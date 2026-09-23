@@ -70,6 +70,14 @@ class AudioEngine {
   private multibandSum: GainNode | null = null;
   private limiterShaper: WaveShaperNode | null = null;
 
+  // A/B Mastering and Loudness-Matched Gain Compensation Nodes
+  private rawMixBypassGain: GainNode | null = null;
+  private processedMasterGain: GainNode | null = null;
+  private abSumGain: GainNode | null = null;
+  private abMode: 'A' | 'B' = 'B'; // 'A' = Mix Brut, 'B' = Master Traité
+  private gainCompEnabled: boolean = true;
+  private gainCompOffsetDb: number = 3.6;
+
   // Sequencer loop state
   private isLooping: boolean = false;
   private loopTimer: number | null = null;
@@ -256,19 +264,34 @@ class AudioEngine {
     this.limiterShaper.curve = this.makeSoftClipCurve();
     this.limiterShaper.oversample = '2x';
 
-    // 5. Master Gain & Analyser
+    // 5. Master Gain, A/B Switcher & Analyser
     this.masterGain = this.ctx.createGain();
     this.masterGain.gain.setValueAtTime(0.85, now);
+
+    this.rawMixBypassGain = this.ctx.createGain();
+    this.processedMasterGain = this.ctx.createGain();
+    this.abSumGain = this.ctx.createGain();
 
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 512;
     this.analyser.smoothingTimeConstant = 0.8;
 
-    // Final chain: multibandSum -> limiterShaper -> masterGain -> analyser -> destination
+    // Connect Path A (Raw Mix Bypass): inputBus -> rawMixBypassGain -> abSumGain
+    this.inputBus.connect(this.rawMixBypassGain);
+    this.rawMixBypassGain.connect(this.abSumGain);
+
+    // Connect Path B (Processed Master Chain): multibandSum -> limiterShaper -> masterGain -> processedMasterGain -> abSumGain
     this.multibandSum.connect(this.limiterShaper);
     this.limiterShaper.connect(this.masterGain);
-    this.masterGain.connect(this.analyser);
+    this.masterGain.connect(this.processedMasterGain);
+    this.processedMasterGain.connect(this.abSumGain);
+
+    // Final output: abSumGain -> analyser -> destination
+    this.abSumGain.connect(this.analyser);
     this.analyser.connect(this.ctx.destination);
+
+    // Set initial gains according to A/B mode
+    this.updateAbRouting();
   }
 
   public ensureContext() {
@@ -293,6 +316,75 @@ class AudioEngine {
       low: this.compLow ? Math.abs(this.compLow.reduction) : 0,
       mid: this.compMid ? Math.abs(this.compMid.reduction) : 0,
       high: this.compHigh ? Math.abs(this.compHigh.reduction) : 0,
+    };
+  }
+
+  // ==================== A/B MASTERING & GAIN COMPENSATION ====================
+
+  /**
+   * Updates routing gains for A/B switching and loudness-matched compensation
+   */
+  public updateAbRouting() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const rampTime = 0.025; // Smooth pop-free transition
+
+    if (this.abMode === 'A') {
+      // MODE A : Raw Mix Brut (bypasses parametric EQ, multiband compression & limiter)
+      if (this.rawMixBypassGain) {
+        this.rawMixBypassGain.gain.setTargetAtTime(1.0, now, rampTime);
+      }
+      if (this.processedMasterGain) {
+        this.processedMasterGain.gain.setTargetAtTime(0.0, now, rampTime);
+      }
+    } else {
+      // MODE B : Master Traité (processed through full mastering chain)
+      if (this.rawMixBypassGain) {
+        this.rawMixBypassGain.gain.setTargetAtTime(0.0, now, rampTime);
+      }
+      if (this.processedMasterGain) {
+        // When gain compensation is enabled, attenuate Master by gainCompOffsetDb
+        // so that perceived loudness matches the unprocessed mix
+        const targetGain = this.gainCompEnabled
+          ? this.dbToGain(-this.gainCompOffsetDb)
+          : 1.0;
+        this.processedMasterGain.gain.setTargetAtTime(targetGain, now, rampTime);
+      }
+    }
+  }
+
+  public setAbMode(mode: 'A' | 'B') {
+    this.abMode = mode;
+    this.updateAbRouting();
+  }
+
+  public getAbMode(): 'A' | 'B' {
+    return this.abMode;
+  }
+
+  public setGainCompensationEnabled(enabled: boolean) {
+    this.gainCompEnabled = enabled;
+    this.updateAbRouting();
+  }
+
+  public isGainCompensationEnabled(): boolean {
+    return this.gainCompEnabled;
+  }
+
+  public setGainCompensationOffset(db: number) {
+    this.gainCompOffsetDb = Math.max(0, Math.min(12, db));
+    this.updateAbRouting();
+  }
+
+  public getGainCompensationOffset(): number {
+    return this.gainCompOffsetDb;
+  }
+
+  public getAbState(): { mode: 'A' | 'B'; gainCompEnabled: boolean; gainCompOffsetDb: number } {
+    return {
+      mode: this.abMode,
+      gainCompEnabled: this.gainCompEnabled,
+      gainCompOffsetDb: this.gainCompOffsetDb,
     };
   }
 
@@ -365,6 +457,8 @@ class AudioEngine {
         highMakeup: 0.8,
       };
       this.updateMultiband(mb);
+      this.gainCompOffsetDb = 1.8;
+      this.updateAbRouting();
       return {
         eq,
         mb,
@@ -394,6 +488,8 @@ class AudioEngine {
         highMakeup: 2.5,
       };
       this.updateMultiband(mb);
+      this.gainCompOffsetDb = 3.6;
+      this.updateAbRouting();
       return {
         eq,
         mb,
@@ -423,6 +519,8 @@ class AudioEngine {
         highMakeup: 3.5,
       };
       this.updateMultiband(mb);
+      this.gainCompOffsetDb = 4.8;
+      this.updateAbRouting();
       return {
         eq,
         mb,
