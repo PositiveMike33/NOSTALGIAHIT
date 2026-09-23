@@ -1,0 +1,6 @@
+{
+  "name": "NostalgiaHit Studio",
+  "description": "Studio multi-agentique de remixage nostalgique, topline vocale, mastering et packaging viral.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
